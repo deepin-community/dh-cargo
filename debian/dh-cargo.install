@@ -1,3 +1,5 @@
+Sequence/cargo.pm    /usr/share/perl5/Debian/Debhelper/Sequence/
+cargo-auto-test      /usr/share/cargo/bin
 cargo.pm             /usr/share/perl5/Debian/Debhelper/Buildsystem/
 dh-cargo-built-using /usr/share/cargo/bin
-cargo-auto-test      /usr/share/cargo/bin
+dh-cargo-vendored-sources   /usr/share/cargo/bin
