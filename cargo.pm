@@ -142,8 +142,13 @@ sub configure {
     my $this=shift;
     doit("cp", "debian/cargo-checksum.json",
          ".cargo-checksum.json");
-    rm_files("Cargo.lock");
-    doit("/usr/share/cargo/bin/cargo", "prepare-debian", "debian/cargo_registry", "--link-from-system");
+    if (defined $ENV{'CARGO_VENDOR_DIR'}) {
+        doit("/usr/share/cargo/bin/cargo", "prepare-debian", $ENV{'CARGO_VENDOR_DIR'});
+        doit("/usr/share/cargo/bin/dh-cargo-vendored-sources");
+    } else {
+        rm_files("Cargo.lock");
+        doit("/usr/share/cargo/bin/cargo", "prepare-debian", "debian/cargo_registry", "--link-from-system");
+    }
 }
 
 sub test {
@@ -189,6 +194,15 @@ sub install {
         my $destdir = $ENV{'DESTDIR'} || tmpdir($this->{binpkg});
         doit("env", "DESTDIR=$destdir",
              "/usr/share/cargo/bin/cargo", "install", @_);
+        if (defined $ENV{'CARGO_VENDOR_DIR'}) {
+            if (-e "Cargo.lock") {
+                my $lockfile_dir=tmpdir($this->{binpkg}) . "/usr/share/doc/" . $this->{binpkg};
+                install_dir($lockfile_dir);
+                install_file("Cargo.lock", $lockfile_dir . "/Cargo.lock");
+            } else {
+                warning("Cargo.lock file not found!");
+            }
+        }
         # generate Built-Using fields
         doit("env", "/usr/share/cargo/bin/dh-cargo-built-using", $this->{binpkg});
     }
