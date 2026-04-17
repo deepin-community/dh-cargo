@@ -24,3 +24,6 @@ if dpkg-buildpackage 2> ../error_logs; then
     exit 1
 fi
 grep -q "XS-Vendored-Sources-Rust" ../error_logs
+
+cp debian/rules.vendored-output-expected debian/rules
+dpkg-buildpackage

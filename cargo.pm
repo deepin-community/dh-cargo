@@ -24,6 +24,7 @@ use strict;
 use warnings;
 use Cwd;
 use Debian::Debhelper::Dh_Lib;
+use Dpkg::BuildFlags;
 use Dpkg::Changelog::Debian;
 use Dpkg::Control::Info;
 use Dpkg::Version;
@@ -32,6 +33,16 @@ use base 'Debian::Debhelper::Buildsystem';
 
 sub DESCRIPTION {
     "Rust Cargo"
+}
+
+sub set_extra_flags {
+    my $bf = Dpkg::BuildFlags->new();
+    my @cargo_flags = ();
+    $bf->load_config();
+    if ($bf->has_features("optimize") and {$bf->get_features("optimize")}->{"lto"}) {
+        push(@cargo_flags, '--config', 'profile.release.lto = "thin"');
+    }
+    return @cargo_flags;
 }
 
 sub cargo_version {
@@ -98,17 +109,18 @@ sub pre_building_step {
     $this->{binpkg} = 0;
     $this->{featurepkg} = [];
     foreach my $package (@packages) {
-        if ($package->{Package} =~ /^libru[sz]t-.*-dev$/) {
-            if ($package->{Package} =~ /\+/) {
-                push(@{$this->{featurepkg}}, $package->{Package});
+        my $pkg = $package->{Package};
+        if ($pkg =~ /^libru[sz]t-.*-dev$/) {
+            if ($pkg =~ /\+/) {
+                push(@{$this->{featurepkg}}, $pkg);
                 next;
             }
             if ($this->{libpkg}) {
-                error("Multiple Cargo lib packages found: " . $this->{libpkg} . " and " . $package->{Package});
+                error("Multiple Cargo lib packages found: " . $this->{libpkg} . " and " . $pkg);
             }
-            $this->{libpkg} = $package->{Package};
+            $this->{libpkg} = $pkg;
         } elsif ($package->{Architecture} ne 'all') {
-            $this->{binpkg} = $package->{Package};
+            $this->{binpkg} = $pkg;
         }
     }
     if (!$this->{libpkg} && !$this->{binpkg}) {
@@ -174,6 +186,7 @@ sub install {
     my $this=shift;
     my $destdir=shift;
     my $crate = $this->{crate} . '-' . ($this->{version} =~ tr/~/-/r);
+    my @extra_flags = $this->set_extra_flags();
     if ($this->{libpkg}) {
         my $target = tmpdir($this->{libpkg}) . "/usr/share/cargo/registry/$crate";
         my @sources = $this->get_sources();
@@ -193,7 +206,7 @@ sub install {
         # Do the install
         my $destdir = $ENV{'DESTDIR'} || tmpdir($this->{binpkg});
         doit("env", "DESTDIR=$destdir",
-             "/usr/share/cargo/bin/cargo", "install", @_);
+             "/usr/share/cargo/bin/cargo", "install", @extra_flags, @_);
         if (defined $ENV{'CARGO_VENDOR_DIR'}) {
             if (-e "Cargo.lock") {
                 my $lockfile_dir=tmpdir($this->{binpkg}) . "/usr/share/doc/" . $this->{binpkg};
