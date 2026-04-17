@@ -1,3 +1,0 @@
-Tests: vendor-tests.sh
-Depends: @, build-essential
-Restrictions: allow-stderr

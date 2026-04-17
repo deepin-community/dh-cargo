@@ -10,8 +10,9 @@ CARGO_CHANNEL="${CARGO_CHANNEL:-release}"
 # useful for testing:
 # CARGO_REGISTRY="$HOME/.cargo/registry/src/github.com-1ecc6299db9ec823" DEB_HOST_RUST_TYPE="." CARGO_CHANNEL=debug
 
-CARGO_TARGET_DIR="target/$DEB_HOST_RUST_TYPE/$CARGO_CHANNEL"
-CARGO_TARGET_DIR_ABS="$(readlink -f "$CARGO_TARGET_DIR")"
+CARGO_BUILT_USING_SRC_DIR="${CARGO_BUILT_USING_SRC_DIR:-$PWD}"
+CARGO_BUILT_USING_TARGET_DIR="${CARGO_BUILT_USING_TARGET_DIR:-target/$DEB_HOST_RUST_TYPE/$CARGO_CHANNEL}"
+CARGO_BUILT_USING_TARGET_DIR_ABS="$(readlink -f "$CARGO_BUILT_USING_TARGET_DIR")"
 
 CPRIGHT_FORMAT="https://www.debian.org/doc/packaging-manuals/copyright-format/1.0"
 SRCLEFT_LICENSES="$(echo GPL LGPL AGPL GFDL MPL CDDL CPL Artistic Perl QPL | tr ' ' '\n')"
@@ -19,12 +20,12 @@ pkg_has_srcleft_license() {
 	local pkg="$1"
 	local ver="$2"
 	local f="/usr/share/doc/$pkg/copyright"
-	if ! sed -nre 's	^Format: (.*)	\1	gp' "$f" | grep -qiw "$CPRIGHT_FORMAT"; then
+	if ! sed -nre 's!^Format: (.*)!\1!gp' "$f" | grep -qiw "$CPRIGHT_FORMAT"; then
 		echo >&2 "$0: abort: Not in machine-readable format: $f"
 		echo 2
-	elif sed -nre 's	^X-Binary-Requires-Source: (.*)	\1	gp' "$f" | grep -qiw yes; then
+	elif sed -nre 's!^X-Binary-Requires-Source: (.*)!\1!gp' "$f" | grep -qiw yes; then
 		echo 1
-	elif sed -nre 's	^License: (.*)	\1	gp' "$f" | grep -qiwF "$SRCLEFT_LICENSES"; then
+	elif sed -nre 's!^License: (.*)!\1!gp' "$f" | grep -qiwF "$SRCLEFT_LICENSES"; then
 		echo 1
 	else
 		echo 0
@@ -33,7 +34,8 @@ pkg_has_srcleft_license() {
 
 dep_files_to_pkgs() {
 	xargs -r dpkg -S \
-	| sed -nre 's	(.*): .*	\1	gp' \
+	| sed -nre 's!(.*): .*!\1!gp' \
+	| sed -re 's!, !\n!g' \
 	| xargs -r dpkg-query --show \
 	| while read pkg ver; do echo "$pkg $ver $(pkg_has_srcleft_license "${pkg%:*}" "$ver")"; done
 	# pkg_has_srcleft_license should be accurate for all rust crates, no need to give a $containing_crate
@@ -41,8 +43,9 @@ dep_files_to_pkgs() {
 }
 
 rust_dep_files() {
-	cat "$CARGO_TARGET_DIR/deps"/*.d \
-	| sed -nre 's	^\S*/('"$CARGO_REGISTRY"'/[^/]*)/.*	'"$(readlink -f "$PWD")/"'\1	gp' \
+	CARGO_REGISTRY_ABS_PATH="$(readlink -f "$CARGO_REGISTRY")"
+	cat "$CARGO_BUILT_USING_TARGET_DIR/deps"/*.d \
+	| sed -nre 's!^('"$CARGO_REGISTRY_ABS_PATH"'/[^/]*)/.*!\1!gp' \
 	| sort -u \
 	| xargs -r readlink -f
 }
@@ -53,9 +56,9 @@ rust_libs() {
 
 gcc_default_searchdirs() {
 	gcc -print-search-dirs \
-	| sed -nre 's	^libraries: (.*)	\1	gp' \
+	| sed -nre 's!^libraries: (.*)!\1!gp' \
 	| tr ':' '\n' \
-	| sed -e 's	^=	'"$(gcc -print-sysroot)"'	g' \
+	| sed -e 's!^=!'"$(gcc -print-sysroot)"'!g' \
 	| xargs readlink -m 2>/dev/null # suppress errors caused by early pipe closure
 }
 
@@ -79,23 +82,23 @@ rust_search_lib() {
 }
 
 native_libs() {
-	ls -1d "$CARGO_TARGET_DIR/build"/*/output 2>/dev/null | while read output; do
-		sed -nre 's	^cargo:rustc-link-lib=static=(.*)	\1 '"$output"'	gp' "$output"
+	ls -1d "$CARGO_BUILT_USING_TARGET_DIR/build"/*/output 2>/dev/null | while read output; do
+		sed -nre 's!^cargo:rustc-link-lib=static=(.*)!\1 '"$output"'!gp' "$output"
 	done | while read lib output; do
 		local containing_crate="$(basename "$(dirname "$output")")"
 		test -n "$lib" || continue
-		local libfile="$(sed -nre 's	^cargo:rustc-link-search=native=(.*)	\1	gp' "$output" | rust_search_lib "$lib")"
+		local libfile="$(sed -nre 's!^cargo:rustc-link-search=native=(.*)!\1!gp' "$output" | rust_search_lib "$lib")"
 		local srcleft=""
 		test -n "$libfile" || { echo >&2 "$0: abort: could not find static lib '$lib'; rustc should have failed already?"; exit 1; }
 		echo >&2 "$0: found static lib $lib at $libfile"
-		if [ "${libfile#$CARGO_TARGET_DIR_ABS/}" != "$libfile" ]; then
+		if [ "${libfile#$CARGO_BUILT_USING_TARGET_DIR_ABS/}" != "$libfile" ]; then
 			# static library source code embedded in crate
-			local srcstat="$(sed -nre 's	^dh-cargo:deb-built-using='"$lib"'=([01]=.*)	\1	gp' "$output")"
+			local srcstat="$(sed -nre 's!^dh-cargo:deb-built-using='"$lib"'=([01]=.*)!\1!gp' "$output")"
 			case "$srcstat" in
 			0=*|1=*)
 				srcleft="${srcstat%%=*}"
 				libfile="${srcstat#*=}"
-				if [ "$(readlink -f "$libfile")" = "$(readlink -f "$PWD")" ]; then
+				if [ "$(readlink -f "$libfile")" = "$(readlink -f "$CARGO_BUILT_USING_SRC_DIR")" ]; then
 					# Note that this exception only applies in the case that where you are building
 					# the Debian package for $containing_crate itself. In the case where you are
 					# building a Debian package for crate X depending on $containing_crate, the
@@ -106,7 +109,7 @@ native_libs() {
 				fi
 				;;
 			*)
-				echo >&2 "$0: abort: could not determine source-distribution conditions of ${libfile#$CARGO_TARGET_DIR_ABS/}."
+				echo >&2 "$0: abort: could not determine source-distribution conditions of ${libfile#$CARGO_BUILT_USING_TARGET_DIR_ABS/}."
 				echo >&2 "You must patch build.rs of ${containing_crate%-*} to output 'println!(\"dh-cargo:deb-built-using=$lib=\$s={}\", env::var(\"CARGO_MANIFEST_DIR\").unwrap());' where:"
 				echo >&2 "- \$s is 1 if the license(s) of the included static libs require source distribution alongside binaries, otherwise 0"
 				exit 1
@@ -115,16 +118,16 @@ native_libs() {
 		fi
 		local wpkg="$(dpkg -S "$(readlink -f "$libfile")")"
 		test -n "$wpkg" || { echo >&2 "$0: abort: could not find Debian package for file $libfile"; exit 1; }
-		local pkgstat="$(echo "$wpkg" | sed -nre 's	(.*): .*	\1	gp' | xargs -r dpkg-query --show)"
+		local pkgstat="$(echo "$wpkg" | sed -nre 's!(.*): .*!\1!gp' | xargs -r dpkg-query --show)"
 		local pkg="$(echo "$pkgstat" | cut -f1)"
 		local ver="$(echo "$pkgstat" | cut -f2)"
 		# static library source code embedded in crate (from earlier)
 		if [ -n "$srcleft" ]; then
 			echo "$pkg $ver $srcleft"
 		# static libraries from another Debian package
-		elif sed -nre 's	^dh-cargo:deb-built-using='"$lib"'=0~=(.*)	\1	gp' "$output" | { echo "${pkg%:*} $ver" | grep -qExf /dev/fd/3; } 3<&0; then
+		elif sed -nre 's!^dh-cargo:deb-built-using='"$lib"'=0~=(.*)!\1!gp' "$output" | { echo "${pkg%:*} $ver" | grep -qExf /dev/fd/3; } 3<&0; then
 			echo "$pkg $ver 0"
-		elif sed -nre 's	^dh-cargo:deb-built-using='"$lib"'=1~=(.*)	\1	gp' "$output" | { echo "${pkg%:*} $ver" | grep -qExf /dev/fd/3; } 3<&0; then
+		elif sed -nre 's!^dh-cargo:deb-built-using='"$lib"'=1~=(.*)!\1!gp' "$output" | { echo "${pkg%:*} $ver" | grep -qExf /dev/fd/3; } 3<&0; then
 			echo "$pkg $ver 1"
 		else
 			# guess the conditions based on the whole d/copyright file
@@ -145,24 +148,34 @@ native_libs() {
 	done
 }
 
+output_built_using() {
+	local binpkg="$1"
+	local built_using=""
+	local built_using_x=""
+	while read src srcver srcleft; do
+		case "$srcleft" in
+		2)	exit 1;;
+		1)	built_using="${built_using}$src (= $srcver), ";;
+		esac
+		built_using_x="${built_using_x}$src (= $srcver), "
+	done
+	echo "cargo:Built-Using=${built_using%, }" >> "debian/$binpkg.substvars"
+	echo "cargo:Static-Built-Using=${built_using_x%, }" >> "debian/$binpkg.substvars"
+
+	# deprecated, only kept for binNMU/compat purposes..
+	echo "cargo:X-Cargo-Built-Using?=${built_using_x%, }" >> "debian/$binpkg.substvars"
+}
+
 output() {
 	local binpkg="$1"
 	if [ -z "$binpkg" ]; then
 		cat
 	else
-		local built_using=""
-		local built_using_x=""
 		while read pkg ver srcleft; do
 			local src="$(dpkg-query -f '${source:Package}' --show "$pkg")"
 			local srcver="$(dpkg-query -f '${source:Version}' --show "$pkg")"
-			case "$srcleft" in
-			2)	exit 1;;
-			1)	built_using="${built_using}$src (= $srcver), ";;
-			esac
-			built_using_x="${built_using_x}$src (= $srcver), "
-		done
-		echo "cargo:Built-Using=${built_using%, }" >> "debian/$binpkg.substvars"
-		echo "cargo:X-Cargo-Built-Using=${built_using_x%, }" >> "debian/$binpkg.substvars"
+			echo "$src $srcver $srcleft"
+		done | uniq | output_built_using "$binpkg"
 	fi
 }
 

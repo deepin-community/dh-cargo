@@ -1,8 +1,7 @@
 Source: dh-cargo
 Section: devel
 Priority: optional
-Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
-XSBC-Original-Maintainer: Rust Maintainers <pkg-rust-maintainers@lists.alioth.debian.org>
+Maintainer: Rust Maintainers <pkg-rust-maintainers@alioth-lists.debian.net>
 Uploaders:
  Josh Triplett <josh@joshtriplett.org>,
  Ximin Luo <infinity0@debian.org>,

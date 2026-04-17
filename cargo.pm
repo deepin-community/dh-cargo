@@ -91,31 +91,39 @@ sub pre_building_step {
     $this->{crate} = $crate;
     my $changelog = Dpkg::Changelog::Debian->new(range => { count => 1 });
     $changelog->load("debian/changelog");
-    $this->{version} = Dpkg::Version->new(@{$changelog}[0]->get_version())->version();
-
+    my $version = $source->{'X-Cargo-Crate-Version'};
+    if (!$version) {
+	$version = Dpkg::Version->new(@{$changelog}[0]->get_version())->version();
+    }
+    $this->{version} = $version;
     my @packages = $control->get_packages();
     $this->{libpkg} = 0;
     $this->{binpkg} = 0;
     $this->{featurepkg} = [];
     foreach my $package (@packages) {
-        if ($package->{Package} =~ /^libru[sz]t-.*-dev$/) {
-            if ($package->{Package} =~ /\+/) {
-                push(@{$this->{featurepkg}}, $package->{Package});
+        my $pkg = $package->{Package};
+
+        # handle -N<package>
+        next if !process_pkg($pkg);
+
+        if ($pkg =~ /^libru[sz]t-.*-dev$/) {
+            if ($pkg =~ /\+/) {
+                push(@{$this->{featurepkg}}, $pkg);
                 next;
             }
             if ($this->{libpkg}) {
-                error("Multiple Cargo lib packages found: " . $this->{libpkg} . " and " . $package->{Package});
+                error("Multiple Cargo lib packages found: " . $this->{libpkg} . " and " . $pkg);
             }
-            $this->{libpkg} = $package->{Package};
-        } elsif ($package->{Architecture} ne 'all') {
-            $this->{binpkg} = $package->{Package};
+            $this->{libpkg} = $pkg;
+        } elsif ($package->{Architecture} ne 'all' && !$this->{binpkg}) {
+            $this->{binpkg} = $pkg;
         }
     }
     if (!$this->{libpkg} && !$this->{binpkg}) {
-        error("Could not find any Cargo lib or bin packages to build.");
+        error("Could not find any Cargo lib or bin packages following dh-cargo scheme! Check debian/control.");
     }
     if (@{$this->{featurepkg}} && !$this->{libpkg}) {
-        error("Found feature packages but no lib package.");
+        error("Found feature packages but no lib package, check debian/control.");
     }
 
     my $parallel = $this->get_parallel();
@@ -132,7 +140,18 @@ sub pre_building_step {
 sub get_sources {
     my $this=shift;
     opendir(my $dirhandle, '.');
-    my @sources = grep { $_ ne '.' && $_ ne '..' && $_ ne '.git' && $_ ne '.pc' && $_ ne 'debian' } readdir($dirhandle);
+    my $excluded = {
+        map { $_ => 1 }
+        (
+            '.',
+            '..',
+            '.git',
+            '.pc',
+            'debian',
+            'target',
+        )
+    };
+    my @sources = grep { !$excluded->{$_} } readdir($dirhandle);
     push @sources, 'debian/patches' if -d 'debian/patches';
     closedir($dirhandle);
     @sources
@@ -142,12 +161,25 @@ sub configure {
     my $this=shift;
     doit("cp", "debian/cargo-checksum.json",
          ".cargo-checksum.json");
-    if (defined $ENV{'CARGO_VENDOR_DIR'}) {
-        doit("/usr/share/cargo/bin/cargo", "prepare-debian", $ENV{'CARGO_VENDOR_DIR'});
-        doit("/usr/share/cargo/bin/dh-cargo-vendored-sources");
-    } else {
-        rm_files("Cargo.lock");
-        doit("/usr/share/cargo/bin/cargo", "prepare-debian", "debian/cargo_registry", "--link-from-system");
+    rm_files("Cargo.lock");
+    doit("/usr/share/cargo/bin/cargo", "prepare-debian", "debian/cargo_registry", "--link-from-system");
+}
+
+sub build {
+    my $this=shift;
+
+    my $destdir=shift;
+    if ($this->{libpkg}) {
+        my $copied_sources = generated_file("_source", "copied_sources");
+        install_dir($copied_sources);
+        my @sources = $this->get_sources();
+        doit("cp", "--parents", "-at", $copied_sources, @sources);
+        doit("cp", "debian/cargo-checksum.json", "$copied_sources/.cargo-checksum.json");
+        # honor -X
+        if (defined($dh{EXCLUDE_FIND}) && $dh{EXCLUDE_FIND} ne '') {
+                my $find_options = "$dh{EXCLUDE_FIND}";
+                complex_doit("find $copied_sources $find_options -delete");
+        }
     }
 }
 
@@ -173,14 +205,25 @@ sub test {
 sub install {
     my $this=shift;
     my $destdir=shift;
-    my $crate = $this->{crate} . '-' . ($this->{version} =~ tr/~/-/r);
     if ($this->{libpkg}) {
-        my $target = tmpdir($this->{libpkg}) . "/usr/share/cargo/registry/$crate";
-        my @sources = $this->get_sources();
+        require Cwd;
+        my $cwd = Cwd::getcwd();
+        my $crate = $this->{crate} . '-' . ($this->{version} =~ tr/~/-/r);
+
+        # needs to be absolute because of chdir below
+        my $target = $cwd . '/' . tmpdir($this->{libpkg}) . "/usr/share/cargo/registry/$crate";
         install_dir($target);
-        doit("cp", "--parents", "-at", $target, @sources);
-        doit("rm", "-rf", "$target/target");
-        doit("cp", "debian/cargo-checksum.json", "$target/.cargo-checksum.json");
+
+        my $copied_sources = generated_file("_source", "copied_sources");
+        my %options = (
+                chdir => $copied_sources,
+        );
+        doit(\%options, "cp", "--parents", "-at", $target, ".");
+        # honor -X
+        if (defined($dh{EXCLUDE_FIND}) && $dh{EXCLUDE_FIND} ne '') {
+                my $find_options = "$dh{EXCLUDE_FIND}";
+                complex_doit("find $target $find_options -delete");
+        }
         # prevent an ftpmaster auto-reject regarding files with old dates.
         doit("touch", "-d@" . $ENV{SOURCE_DATE_EPOCH}, "$target/Cargo.toml");
     }
@@ -194,17 +237,8 @@ sub install {
         my $destdir = $ENV{'DESTDIR'} || tmpdir($this->{binpkg});
         doit("env", "DESTDIR=$destdir",
              "/usr/share/cargo/bin/cargo", "install", @_);
-        if (defined $ENV{'CARGO_VENDOR_DIR'}) {
-            if (-e "Cargo.lock") {
-                my $lockfile_dir=tmpdir($this->{binpkg}) . "/usr/share/doc/" . $this->{binpkg};
-                install_dir($lockfile_dir);
-                install_file("Cargo.lock", $lockfile_dir . "/Cargo.lock");
-            } else {
-                warning("Cargo.lock file not found!");
-            }
-        }
         # generate Built-Using fields
-        doit("env", "/usr/share/cargo/bin/dh-cargo-built-using", $this->{binpkg});
+        doit("/usr/share/cargo/bin/dh-cargo-built-using", $this->{binpkg});
     }
 }
 
